@@ -1,0 +1,29 @@
+# databases created by examples, tests and local use
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# node
+node_modules/
+ts/dist/
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# local launch material (not part of the repo)
+_launch/
+_to_delete/

@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rundb-ai"
+version = "0.1.0"
+description = "Local-first, single-file database for AI agents: runs, retries, traces, memory. SDK + CLI + MCP server."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Ashish Sharda" }]
+keywords = ["ai-agents", "agents", "mcp", "sqlite", "tracing", "memory", "llm", "observability"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Topic :: Database",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/ashishjsharda/rundb"
+Issues = "https://github.com/ashishjsharda/rundb/issues"
+
+[project.scripts]
+rundb = "rundb.cli:main"
+rundb-mcp = "rundb.mcp_server:main"
+
+[tool.setuptools.packages.find]
+include = ["rundb*"]
+
+[tool.setuptools.package-data]
+"rundb.migrations" = ["*.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
