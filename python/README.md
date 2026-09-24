@@ -4,7 +4,7 @@
 Every run, retry, fork, trace and lesson learned, in one SQLite file.
 
 [![PyPI](https://img.shields.io/pypi/v/rundb-ai?color=blue&label=pypi)](https://pypi.org/project/rundb-ai/)
-[![Downloads](https://static.pepy.tech/badge/rundb-ai)](https://pepy.tech/project/rundb-ai)
+[![Downloads](https://img.shields.io/pepy/dt/rundb-ai?label=downloads)](https://pepy.tech/project/rundb-ai)
 [![Monthly downloads](https://img.shields.io/pypi/dm/rundb-ai?label=downloads%2Fmonth)](https://pypistats.org/packages/rundb-ai)
 [![Python](https://img.shields.io/pypi/pyversions/rundb-ai)](https://pypi.org/project/rundb-ai/)
 [![CI](https://github.com/ashishjsharda/rundb/actions/workflows/ci.yml/badge.svg)](https://github.com/ashishjsharda/rundb/actions/workflows/ci.yml)

@@ -3,7 +3,7 @@
 **A local-first database for AI agents.** One SQLite file holds every run, retry, fork, trace and lesson learned. Python SDK, TypeScript SDK, CLI and MCP server. Zero dependencies. Apache-2.0.
 
 [![PyPI](https://img.shields.io/pypi/v/rundb-ai?color=blue&label=pypi)](https://pypi.org/project/rundb-ai/)
-[![Downloads](https://static.pepy.tech/badge/rundb-ai)](https://pepy.tech/project/rundb-ai)
+[![Downloads](https://img.shields.io/pepy/dt/rundb-ai?label=downloads)](https://pepy.tech/project/rundb-ai)
 [![Python](https://img.shields.io/pypi/pyversions/rundb-ai)](https://pypi.org/project/rundb-ai/)
 [![CI](https://github.com/ashishjsharda/rundb/actions/workflows/ci.yml/badge.svg)](https://github.com/ashishjsharda/rundb/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
