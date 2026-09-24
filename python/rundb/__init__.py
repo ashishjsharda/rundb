@@ -11,4 +11,4 @@ from .client import (
 )
 
 __all__ = ["connect", "RunDB", "Run", "RunDBError", "RUN_STATUSES", "SPAN_KINDS", "MEMORY_KINDS"]
-__version__ = "0.1.0"
+__version__ = "0.1.1"

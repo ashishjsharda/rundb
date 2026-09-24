@@ -2,8 +2,11 @@
 
 **A local-first database for AI agents.** One SQLite file holds every run, retry, fork, trace and lesson learned. Python SDK, TypeScript SDK, CLI and MCP server. Zero dependencies. Apache-2.0.
 
+[![PyPI](https://img.shields.io/pypi/v/rundb-ai?color=blue&label=pypi)](https://pypi.org/project/rundb-ai/)
+[![Downloads](https://static.pepy.tech/badge/rundb-ai)](https://pepy.tech/project/rundb-ai)
+[![Python](https://img.shields.io/pypi/pyversions/rundb-ai)](https://pypi.org/project/rundb-ai/)
 [![CI](https://github.com/ashishjsharda/rundb/actions/workflows/ci.yml/badge.svg)](https://github.com/ashishjsharda/rundb/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
 ## The problem
 
@@ -16,8 +19,8 @@ RunDB gives agents that memory. It lives in a single file next to your code, wor
 ## 30-second quickstart
 
 ```bash
+pip install rundb-ai              # zero dependencies; Python 3.10+
 git clone https://github.com/ashishjsharda/rundb && cd rundb
-pip install ./python              # zero dependencies; Python 3.10+
 python examples/coding_agent_retry.py
 rundb --db demo.db failed my-repo
 ```
@@ -63,7 +66,7 @@ Also available: `recall`, `forget`, `add_artifact`, `add_chunk` (with an optiona
 ## Use it from your coding agent (MCP)
 
 ```bash
-claude mcp add rundb -e RUNDB_PATH="$PWD/agent.db" -- rundb mcp        # Claude Code
+claude mcp add rundb -- rundb mcp        # Claude Code (uses ./agent.db)
 ```
 
 ```jsonc
