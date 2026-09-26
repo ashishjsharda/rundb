@@ -8,7 +8,7 @@ Thanks for helping. RunDB is meant to stay small, so please open an issue before
 pip install -e "python[dev]"
 pytest python/tests
 
-cd ts && npm install && npm test   # Node >= 22.13; also runs the Python interop test
+cd ts && npm install && npm test   # Node >= 22.16; also runs the Python interop test
 ```
 
 ## Rules of the road

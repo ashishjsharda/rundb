@@ -109,7 +109,7 @@ Every command accepts `--db PATH` and `--json`.
 
 ## TypeScript
 
-Same file format and same operations, in camelCase. It uses the built-in `node:sqlite`, so there's nothing native to compile. Requires Node 22.13 or newer.
+Same file format and same operations, in camelCase. It uses the built-in `node:sqlite`, so there's nothing native to compile. Requires Node 22.16+ or 24+ (older `node:sqlite` builds lack full-text search, and RunDB says so with a clear error).
 
 ```ts
 import { connect } from "rundb";

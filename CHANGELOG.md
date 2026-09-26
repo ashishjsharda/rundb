@@ -9,6 +9,7 @@ Built from early user feedback.
 - **Better repeat grouping.** Error signatures now fold UUIDs and runs of 8+ hex characters (commit SHAs, temp names) before digits.
 - **Tool and version filters.** `log_span(..., version=)`, `search(tool=, version=)`, `what_failed(tool=, version=)` and `recall(tool=)`, plus matching CLI flags (`--tool`, `--tool-version`, `--fixes`) and MCP arguments.
 - Migration 002 upgrades existing v0.1 databases in place.
+- TypeScript: requires Node 22.16+ or 24+, since earlier `node:sqlite` builds ship without FTS5. Older versions now fail with a clear message instead of "no such module: fts5".
 - "How `what_failed()` works" section in the README.
 
 ## 0.1.1

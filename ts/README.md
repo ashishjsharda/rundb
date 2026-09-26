@@ -1,6 +1,6 @@
 # rundb (TypeScript)
 
-TypeScript SDK for [RunDB](https://github.com/ashishjsharda/rundb): a local-first, single-file database for AI agent runs, retries, traces and memory. It has no dependencies because it uses the built-in `node:sqlite`, and it needs Node 22.13 or newer.
+TypeScript SDK for [RunDB](https://github.com/ashishjsharda/rundb): a local-first, single-file database for AI agent runs, retries, traces and memory. It has no dependencies because it uses the built-in `node:sqlite`, and it needs Node 22.16+ or 24+ (earlier versions of `node:sqlite` lack full-text search).
 
 ```bash
 npm install rundb

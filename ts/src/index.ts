@@ -174,6 +174,7 @@ export class RunDB {
     this.cwd = opts.cwd ?? null;
     if (this.path !== ":memory:") mkdirSync(dirname(resolve(this.path)), { recursive: true });
     this.db = new DatabaseSync(this.path);
+    assertFts5(this.db);
     this.db.exec(`PRAGMA busy_timeout=${opts.timeoutMs ?? 10000}`);
     if (this.path !== ":memory:") this.db.exec("PRAGMA journal_mode=WAL");
     this.db.exec("PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;");
@@ -781,6 +782,18 @@ function guessMime(p: string): string | null {
     jpeg: "image/jpeg", pdf: "application/pdf", log: "text/plain", yaml: "application/yaml", yml: "application/yaml",
   };
   return map[ext] ?? null;
+}
+
+/** node:sqlite only ships FTS5 from Node 22.16 / 24.0; fail early with a clear message. */
+function assertFts5(db: DatabaseSync): void {
+  try {
+    db.exec("CREATE VIRTUAL TABLE temp.rundb_fts5_probe USING fts5(x); DROP TABLE temp.rundb_fts5_probe;");
+  } catch {
+    db.close();
+    throw new RunDBError(
+      `RunDB needs SQLite full-text search (FTS5), which Node.js ${process.version} does not include. ` +
+      "Upgrade to Node.js 22.16+ (LTS) or 24+.");
+  }
 }
 
 /** Open (and create/migrate if needed) a RunDB file. Default: $RUNDB_PATH or ./agent.db. */
