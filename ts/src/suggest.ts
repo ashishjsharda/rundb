@@ -19,8 +19,19 @@ export const ERROR_HINTS: Array<[RegExp, string]> = [
     "Network or service unavailable: check the service is up before retrying."],
 ];
 
+// Order matters: UUIDs and hex runs are folded before digits become '#'.
+const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/g;
+const HEX = /\b(?=[0-9a-f]*\d)[0-9a-f]{8,}\b/g; // 8+ hex chars with at least one digit
+
+/** Normalize an error so variants of the same failure group together. Same as Python. */
 export function errorSignature(error: string | null | undefined): string {
-  return (error ?? "").toLowerCase().replace(/\d+/g, "#").replace(/\s+/g, " ").trim().slice(0, 200);
+  return (error ?? "").toLowerCase()
+    .replace(UUID, "<uuid>")
+    .replace(HEX, "<hex>")
+    .replace(/\d+/g, "#")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 200);
 }
 
 export function hintFor(error: string | null | undefined): string | null {
@@ -48,7 +59,12 @@ export function suggest(errors: Row[], repeated: Row[], memories: Row[], resolve
   }
   if (memories.length) {
     const m = memories[0];
-    parts.push(`Known fix in memory '${m.key}': ${m.value}. Apply it before retrying.`);
+    if (m.stale) {
+      parts.push(`Possible fix in memory '${m.key}': ${m.value}. It may be stale ` +
+        `(${m.stale_reason}), so verify it before applying.`);
+    } else {
+      parts.push(`Known fix in memory '${m.key}': ${m.value}. Apply it before retrying.`);
+    }
   }
   if (repeated.length && repeated[0].count >= 3 && !parts.length) {
     const rep = repeated[0];

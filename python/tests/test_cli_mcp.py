@@ -143,3 +143,35 @@ def test_mcp_stdio_subprocess(tmp_path):
     assert [l.get("id") for l in lines] == [1, 2, None]
     assert lines[2]["error"]["code"] == -32700
     assert json.loads(lines[1]["result"]["content"][0]["text"])["status"] == "running"
+
+
+def test_v02_cli_and_mcp_options(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("RUNDB_FINGERPRINT", "0")
+    db = tmp_path / "v2.db"
+    _, run_id, _ = run_cli(db, "start", "t", "-w", "ops", capsys=capsys)
+    run_id = run_id.strip()
+    _, span_id, _ = run_cli(db, "span", run_id, "--name", "pytest", "--tool-version", "8.3",
+                            "--error", "ImportError x a3f9c21e7b", capsys=capsys)
+    run_cli(db, "remember", "fix.x", "pin x", "-w", "ops", "--fixes", span_id.strip(), capsys=capsys)
+    _, out, _ = run_cli(db, "search", "ImportError", "--tool", "pytest", "--tool-version", "8.3",
+                        "--json", capsys=capsys)
+    assert {h["source"] for h in json.loads(out)} == {"span"}
+    _, out, _ = run_cli(db, "failed", "ops", "--tool", "pytest", capsys=capsys)
+    assert "Known fix in memory 'fix.x'" in out
+    _, out, _ = run_cli(db, "recall", "-w", "ops", "--tool", "pytest", capsys=capsys)
+    assert "fix.x" in out and "pytest" in out
+
+    s = Server(connect(tmp_path / "v2mcp.db", fingerprint=False))
+    run, _ = tool(s, "start_run", goal="g", workspace="ops")
+    sid, _ = tool(s, "log_span", run_id=run["id"], kind="tool", name="npm", version="10.2",
+                  error="ERESOLVE could not resolve 0b1c2d3e4f")
+    mem, _ = tool(s, "remember", key="npm.peer", value="use --legacy-peer-deps", workspace="ops",
+                  fixes_span_id=sid["span_id"])
+    other, _ = tool(s, "start_run", goal="g2", workspace="ops")
+    tool(s, "log_span", run_id=other["id"], kind="tool", name="npm", error="ERESOLVE could not resolve 99aa88bb77")
+    report, _ = tool(s, "what_failed", target=other["id"], tool="npm")
+    assert report["related_memories"][0]["match"] == "exact"
+    hits, _ = tool(s, "search", query="ERESOLVE", tool="npm", version="10.2")
+    assert hits and all(h.get("span_id") == sid["span_id"] or h["source"] == "memory" for h in hits)
+    mems, _ = tool(s, "recall", workspace="ops", tool="npm")
+    assert mems[0]["key"] == "npm.peer" and mems[0]["stale"] is False

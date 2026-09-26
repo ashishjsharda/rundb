@@ -1,6 +1,6 @@
 {
   "name": "rundb",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local-first, single-file database for AI agents: runs, retries, traces, memory. Zero dependencies (node:sqlite).",
   "license": "Apache-2.0",
   "author": "Ashish Sharda",
@@ -13,15 +13,33 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "migrations", "README.md"],
-  "engines": { "node": ">=22.13" },
+  "files": [
+    "dist",
+    "migrations",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --no-warnings=ExperimentalWarning --test",
     "prepublishOnly": "npm test"
   },
-  "keywords": ["ai-agents", "agents", "mcp", "sqlite", "tracing", "memory", "llm"],
-  "repository": { "type": "git", "url": "git+https://github.com/ashishjsharda/rundb.git", "directory": "ts" },
+  "keywords": [
+    "ai-agents",
+    "agents",
+    "mcp",
+    "sqlite",
+    "tracing",
+    "memory",
+    "llm"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ashishjsharda/rundb.git",
+    "directory": "ts"
+  },
   "devDependencies": {
     "@types/node": "^22.13.0",
     "typescript": "^5.6.0"

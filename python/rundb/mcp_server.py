@@ -58,6 +58,7 @@ TOOLS: list[dict[str, Any]] = [
             "tokens_in": _s("integer", "Prompt tokens used."),
             "tokens_out": _s("integer", "Completion tokens used."),
             "parent_span_id": _s("string", "Enclosing span id, for nesting."),
+            "version": _s("string", "Version of the tool called, e.g. 'pytest 8.3'."),
         }, ["run_id", "kind", "name"]),
     },
     {
@@ -79,14 +80,16 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "what_failed",
-        "description": "Recent errors for a run (and its ancestors) or a workspace, plus a suggested next step. Call before retrying.",
+        "description": "Recent errors for a run (and its ancestors) or a workspace, known fixes, and a next step. Call before retrying.",
         "inputSchema": _obj({
             "target": _s("string", "Run id or workspace name. Omit for the default workspace."),
+            "tool": _s("string", "Only failures of this tool."),
+            "version": _s("string", "Only failures of this tool version."),
         }, []),
     },
     {
         "name": "remember",
-        "description": "Save a durable lesson (fix, rule, preference). Survives failed runs; same key overwrites.",
+        "description": "Save a durable lesson or fix. Pass fixes_span_id so the fix is matched exactly next time.",
         "inputSchema": _obj({
             "key": _s("string", "Stable key, e.g. 'deploy.env.AWS_REGION'."),
             "value": _s("string", "The thing to remember."),
@@ -95,14 +98,17 @@ TOOLS: list[dict[str, Any]] = [
             "source_run_id": _s("string", "Run where this was learned."),
             "confidence": _s("number", "0..1", minimum=0, maximum=1),
             "ttl": _s("string", "Expire after e.g. '12h' or '30d'. Omit to keep forever."),
+            "fixes_span_id": _s("string", "Id of the failed span this fixes."),
+            "tool": _s("string", "Tool this applies to."),
         }, ["key", "value"]),
     },
     {
         "name": "recall",
-        "description": "List current memories in a workspace, optionally by exact key or kind.",
+        "description": "Current memories in a workspace; each is flagged stale if dependencies changed since saved.",
         "inputSchema": _obj({
             "workspace": _s("string", "Workspace name."),
             "key": _s("string", "Exact key."),
+            "tool": _s("string", "Only memories for this tool."),
             "kind": _s("string", "Memory type.", enum=list(MEMORY_KINDS)),
         }, []),
     },
@@ -116,6 +122,8 @@ TOOLS: list[dict[str, Any]] = [
             "kind": _s("string", "Span or memory kind, e.g. 'tool' or 'constraint'."),
             "source": _s("string", "What to search.", enum=["span", "memory", "chunk"]),
             "since": _s("string", "ISO time or age like '2h', '7d'."),
+            "tool": _s("string", "Only this tool."),
+            "version": _s("string", "Only this tool version."),
             "limit": _s("integer", "Max hits (default 10).", minimum=1, maximum=100),
         }, ["query"]),
     },
@@ -178,9 +186,11 @@ class Server:
             "log_span": self._log_span,
             "end_run": lambda a: self.db.end_run(a["run_id"], a["status"], a.get("summary")),
             "fork_run": lambda a: self.db.fork_run(a["run_id"], a.get("goal")),
-            "what_failed": lambda a: self.db.what_failed(a.get("target") or self.ws),
+            "what_failed": lambda a: self.db.what_failed(a.get("target") or self.ws, tool=a.get("tool"),
+                                                         version=a.get("version")),
             "remember": self._remember,
-            "recall": lambda a: self.db.recall(a.get("workspace") or self.ws, a.get("key"), kind=a.get("kind")),
+            "recall": lambda a: self.db.recall(a.get("workspace") or self.ws, a.get("key"), kind=a.get("kind"),
+                                               tool=a.get("tool")),
             "search": self._search,
             "list_runs": lambda a: self.db.list_runs(a.get("workspace"), a.get("status"), a.get("limit", 10)),
             "get_run": lambda a: {"run": self.db.get_run(a["run_id"]), "spans": self.db.spans(a["run_id"])},
@@ -195,6 +205,7 @@ class Server:
         sid = self.db.log_span(
             a["run_id"], a["kind"], a["name"], a.get("input"), a.get("output"), a.get("error"),
             tokens_in=a.get("tokens_in"), tokens_out=a.get("tokens_out"), parent_span_id=a.get("parent_span_id"),
+            version=a.get("version"),
         )
         return {"span_id": sid}
 
@@ -202,13 +213,15 @@ class Server:
         mid = self.db.remember(
             a.get("workspace") or self.ws, a["key"], a["value"], a.get("kind", "fact"),
             a.get("source_run_id"), confidence=a.get("confidence"), ttl=a.get("ttl"),
+            fixes=a.get("fixes_span_id"), tool=a.get("tool"),
         )
         return {"memory_id": mid}
 
     def _search(self, a: dict[str, Any]) -> Any:
         return self.db.search(
             a["query"], workspace=a.get("workspace"), run_id=a.get("run_id"), kind=a.get("kind"),
-            source=a.get("source"), since=a.get("since"), limit=a.get("limit", 10),
+            source=a.get("source"), since=a.get("since"), tool=a.get("tool"),
+            version=a.get("version"), limit=a.get("limit", 10),
         )
 
     # -- protocol

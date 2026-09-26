@@ -6,9 +6,11 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import { drift, fingerprint, type Fingerprint } from "./env.js";
 import { errorSignature, suggest } from "./suggest.js";
 
 export { errorSignature, hintFor, suggest } from "./suggest.js";
+export { clearFingerprintCache, drift, fingerprint, type Drift, type Fingerprint } from "./env.js";
 
 export const RUN_STATUSES = ["running", "succeeded", "failed", "aborted", "forked"] as const;
 export const TERMINAL_STATUSES = ["succeeded", "failed", "aborted", "forked"] as const;
@@ -127,22 +129,49 @@ export interface StartRunOptions { model?: string | null; parentRunId?: RunLike 
 export interface LogSpanOptions {
   input?: unknown; output?: unknown; error?: unknown; tokensIn?: number; tokensOut?: number;
   parentSpanId?: string; startedAt?: string; endedAt?: string; meta?: unknown;
+  /** Version of the tool called, e.g. "pytest 8.3". */
+  version?: string;
 }
 export interface RememberOptions {
   kind?: MemoryKind; sourceRunId?: RunLike | null; confidence?: number; ttl?: string | number; expiresAt?: string;
+  /** Id of the failed span this memory fixes: copies tool, version, error signature and run. */
+  fixes?: string;
+  tool?: string; toolVersion?: string; error?: string;
+  /** Environment fingerprint override; false to skip stamping. */
+  env?: Fingerprint | boolean | null;
 }
 export interface SearchOptions {
   workspace?: string; runId?: RunLike; kind?: string; source?: "span" | "memory" | "chunk";
   since?: Date | string | number; limit?: number; raw?: boolean;
+  /** Span name / memory tool. */
+  tool?: string;
+  /** Span version / memory tool_version. */
+  version?: string;
 }
+export interface RunDBOptions {
+  timeoutMs?: number;
+  /** Stamp memories with git commit + lockfile hashes (default on; RUNDB_FINGERPRINT=0 disables). */
+  fingerprint?: boolean;
+  /** Directory whose git repo and lockfiles are fingerprinted (default: process.cwd()). */
+  cwd?: string;
+}
+
+// SQL fragment: memory row `m` is the latest version of its key.
+const CURRENT_MEMORY = "NOT EXISTS (SELECT 1 FROM memories n WHERE n.workspace_id = m.workspace_id " +
+  "AND n.key = m.key AND n.rowid > m.rowid)";
 
 export class RunDB {
   readonly path: string;
   readonly db: DatabaseSync;
+  readonly fingerprint: boolean;
+  readonly cwd: string | null;
   private depth = 0;
 
-  constructor(path?: string, opts: { timeoutMs?: number } = {}) {
+  constructor(path?: string, opts: RunDBOptions = {}) {
     this.path = path ?? process.env.RUNDB_PATH ?? "agent.db";
+    this.fingerprint = opts.fingerprint ??
+      !["0", "false", "no", "off"].includes((process.env.RUNDB_FINGERPRINT ?? "1").toLowerCase());
+    this.cwd = opts.cwd ?? null;
     if (this.path !== ":memory:") mkdirSync(dirname(resolve(this.path)), { recursive: true });
     this.db = new DatabaseSync(this.path);
     this.db.exec(`PRAGMA busy_timeout=${opts.timeoutMs ?? 10000}`);
@@ -348,7 +377,7 @@ export class RunDB {
     this.batch(() => {
       try {
         this.insert("spans", {
-          id, run_id: r, parent_span_id: opts.parentSpanId, kind, name,
+          id, run_id: r, parent_span_id: opts.parentSpanId, kind, name, version: opts.version,
           input: toText(opts.input), output: toText(opts.output), error: err,
           tokens_in: opts.tokensIn, tokens_out: opts.tokensOut,
           started_at: opts.startedAt ?? ts, ended_at: opts.endedAt ?? ts, meta: toJson(opts.meta),
@@ -476,29 +505,63 @@ export class RunDB {
     }
     let expiresAt = opts.expiresAt ?? null;
     if (opts.ttl != null && !expiresAt) expiresAt = new Date(Date.now() + seconds(opts.ttl) * 1000).toISOString();
+    let tool = opts.tool ?? null;
+    let toolVersion = opts.toolVersion ?? null;
+    let error = opts.error ?? null;
+    let sourceRunId = rid(opts.sourceRunId);
+    if (opts.fixes) {
+      const span = this.one("SELECT run_id, name, version, error FROM spans WHERE id = ?", [opts.fixes]);
+      if (!span) throw new RunDBError(`span not found: ${opts.fixes}`);
+      tool = tool ?? span.name;
+      toolVersion = toolVersion ?? span.version;
+      error = error ?? span.error;
+      sourceRunId = sourceRunId ?? span.run_id;
+    }
+    let env: Fingerprint | null = null;
+    if (opts.env === undefined || opts.env === null || opts.env === true) {
+      env = this.fingerprint || opts.env === true ? fingerprint(this.cwd) : null;
+    } else if (opts.env !== false) {
+      env = opts.env;
+    }
     const id = newId("mem");
     this.batch(() => {
       const wid = this.workspace(workspace)!;
       this.insert("memories", {
-        id, workspace_id: wid, source_run_id: rid(opts.sourceRunId), kind, key, value: toText(value),
+        id, workspace_id: wid, source_run_id: sourceRunId, kind, key, value: toText(value),
         confidence: opts.confidence, expires_at: expiresAt, created_at: nowIso(),
+        tool, tool_version: toolVersion, error_signature: error ? errorSignature(error) : null,
+        fixes_span_id: opts.fixes ?? null, env: env ? JSON.stringify(env) : null,
       });
     });
     return id;
   }
 
-  recall(workspace: string, key?: string | null, opts: { kind?: MemoryKind; limit?: number; includeHistory?: boolean } = {}): Row[] {
+  /** Current memories; each row gets stale / stale_reason / env_changes. */
+  recall(workspace: string, key?: string | null, opts: {
+    kind?: MemoryKind; tool?: string; limit?: number; includeHistory?: boolean;
+  } = {}): Row[] {
     const wid = this.workspace(workspace, false);
     if (!wid) return [];
     const where = ["m.workspace_id = ?", "(m.expires_at IS NULL OR m.expires_at > ?)"];
     const params: unknown[] = [wid, nowIso()];
     if (key) { where.push("m.key = ?"); params.push(key); }
     if (opts.kind) { where.push("m.kind = ?"); params.push(opts.kind); }
-    if (!opts.includeHistory) {
-      where.push("NOT EXISTS (SELECT 1 FROM memories n WHERE n.workspace_id = m.workspace_id AND n.key = m.key AND n.rowid > m.rowid)");
+    if (opts.tool) { where.push("m.tool = ?"); params.push(opts.tool); }
+    if (!opts.includeHistory) where.push(CURRENT_MEMORY);
+    return this.annotate(this.all(
+      `SELECT m.* FROM memories m WHERE ${where.join(" AND ")} ORDER BY m.rowid DESC LIMIT ?`,
+      [...params, opts.limit ?? 50]));
+  }
+
+  private annotate(memories: Row[]): Row[] {
+    const current = this.fingerprint && memories.length ? fingerprint(this.cwd) : null;
+    for (const m of memories) {
+      const d = drift(m.env ? JSON.parse(m.env) : null, current);
+      m.stale = d.stale;
+      m.stale_reason = d.reason;
+      m.env_changes = d.changes;
     }
-    return this.all(`SELECT m.* FROM memories m WHERE ${where.join(" AND ")} ORDER BY m.rowid DESC LIMIT ?`,
-      [...params, opts.limit ?? 50]);
+    return memories;
   }
 
   forget(workspace: string, key: string): number {
@@ -527,6 +590,14 @@ export class RunDB {
     if (opts.source) { filters.push("search_index.source = ?"); params.push(opts.source); }
     const cutoff = parseSince(opts.since);
     if (cutoff) { filters.push("search_index.ts >= ?"); params.push(cutoff); }
+    if (opts.tool || opts.version) {
+      const sw: string[] = [], mw: string[] = [], sp: unknown[] = [], mp: unknown[] = [];
+      if (opts.tool) { sw.push("name = ?"); sp.push(opts.tool); mw.push("tool = ?"); mp.push(opts.tool); }
+      if (opts.version) { sw.push("version = ?"); sp.push(opts.version); mw.push("tool_version = ?"); mp.push(opts.version); }
+      filters.push(`((search_index.source = 'span' AND search_index.span_id IN (SELECT id FROM spans WHERE ${sw.join(" AND ")})) OR ` +
+        `(search_index.source = 'memory' AND search_index.memory_id IN (SELECT id FROM memories WHERE ${mw.join(" AND ")})))`);
+      params.push(...sp, ...mp);
+    }
 
     const queries: string[] = [];
     if (opts.raw) queries.push(query);
@@ -567,7 +638,12 @@ export class RunDB {
   // ---------------------------------------------------------------- diagnosis
 
   /** Recent failures for a run (+ ancestors) or a workspace, with a deterministic next step. */
-  whatFailed(target?: RunLike | null, opts: { limit?: number } = {}): Row {
+  /**
+   * Recent failures for a run (+ ancestors) or a workspace, known fixes, and a next step.
+   * Fixes whose error signature exactly matches come first (same tool preferred, other tools
+   * still apply); otherwise full-text search. Each fix is flagged if possibly stale.
+   */
+  whatFailed(target?: RunLike | null, opts: { limit?: number; tool?: string; version?: string } = {}): Row {
     const limit = opts.limit ?? 10;
     const tid = rid(target);
     let scope: Row;
@@ -591,17 +667,23 @@ export class RunDB {
     if (runIds) { runFilter = `r.id IN (${runIds.map(() => "?").join(",")})`; rparams = runIds; }
     else if (wid) { runFilter = "r.workspace_id = ?"; rparams = [wid]; }
 
+    let spanFilter = "";
+    const sparams: unknown[] = [];
+    if (opts.tool) { spanFilter += " AND s.name = ?"; sparams.push(opts.tool); }
+    if (opts.version) { spanFilter += " AND s.version = ?"; sparams.push(opts.version); }
     const errors = this.all(
-      `SELECT s.run_id, s.id AS span_id, s.kind, s.name, s.error, s.input, s.started_at AS at
+      `SELECT s.run_id, s.id AS span_id, s.kind, s.name, s.version, s.error, s.input, s.started_at AS at
        FROM spans s JOIN runs r ON r.id = s.run_id
-       WHERE ${runFilter} AND s.error IS NOT NULL
-       ORDER BY s.started_at DESC, s.rowid DESC LIMIT 200`, rparams)
-      .map((e): Row => ({ ...e, input: clip(e.input, 300), error: clip(e.error, 1000) }));
+       WHERE ${runFilter} AND s.error IS NOT NULL${spanFilter}
+       ORDER BY s.started_at DESC, s.rowid DESC LIMIT 200`, [...rparams, ...sparams])
+      .map((e): Row => ({
+        ...e, signature: errorSignature(e.error), input: clip(e.input, 300), error: clip(e.error, 1000),
+      }));
 
     const groups = new Map<string, Row>();
     for (const e of errors) {
-      const k = `${e.name}\u0000${errorSignature(e.error)}`;
-      const g = groups.get(k) ?? { name: e.name, error: e.error, count: 0, run_ids: [] as string[] };
+      const k = `${e.name}\u0000${e.signature}`;
+      const g = groups.get(k) ?? { name: e.name, error: e.error, signature: e.signature, count: 0, run_ids: [] as string[] };
       g.count++;
       if (!g.run_ids.includes(e.run_id)) g.run_ids.push(e.run_id);
       groups.set(k, g);
@@ -628,21 +710,9 @@ export class RunDB {
          WHERE runs.status = 'succeeded' ORDER BY runs.ended_at DESC LIMIT 3`, failedIds);
     }
 
-    let memories: Row[] = [];
-    if (errors.length) {
-      const words = terms([errors[0].name, errors[0].error].filter(Boolean).join(" "))
-        .filter((t) => t.length >= 3 && !STOPWORDS.has(t.toLowerCase()) && !/^\d+$/.test(t));
-      if (words.length) {
-        const hits = this.search([...new Set(words)].join(" "), { workspace: wid ?? undefined, source: "memory", limit: 3 });
-        if (hits.length) {
-          const ids = hits.map((h) => h.memory_id);
-          const byId = new Map(this.all(
-            `SELECT id, key, value, kind, confidence, source_run_id FROM memories WHERE id IN (${ids.map(() => "?").join(",")})`,
-            ids).map((m) => [m.id, m]));
-          memories = ids.filter((i) => byId.has(i)).map((i) => byId.get(i)!);
-        }
-      }
-    }
+    const memories = errors.length ? this.relatedFixes(errors, repeated, wid) : [];
+    if (opts.tool) scope.tool = opts.tool;
+    if (opts.version) scope.version = opts.version;
 
     return {
       scope,
@@ -654,6 +724,41 @@ export class RunDB {
       running,
       suggested_next_step: suggest(errors, repeated, memories, resolvedBy, running),
     };
+  }
+
+  private relatedFixes(errors: Row[], repeated: Row[], wid: string | null): Row[] {
+    const latest = errors[0];
+    const sigs = [...new Set([latest.signature, ...repeated.slice(0, 3).map((g) => g.signature)])];
+    const where = [`m.error_signature IN (${sigs.map(() => "?").join(",")})`,
+      "(m.expires_at IS NULL OR m.expires_at > ?)", CURRENT_MEMORY];
+    const params: unknown[] = [...sigs, nowIso()];
+    if (wid) { where.push("m.workspace_id = ?"); params.push(wid); }
+    let rows = this.all(
+      `SELECT m.* FROM memories m WHERE ${where.join(" AND ")}
+       ORDER BY (m.error_signature = ?) DESC, (m.tool IS ?) DESC, m.rowid DESC LIMIT 3`,
+      [...params, latest.signature, latest.name]);
+    let match = "exact";
+    if (!rows.length) {
+      match = "text";
+      const words = terms([latest.name, latest.error].filter(Boolean).join(" "))
+        .filter((t) => t.length >= 3 && !STOPWORDS.has(t.toLowerCase()) && !/^\d+$/.test(t));
+      const hits = words.length
+        ? this.search([...new Set(words)].join(" "), { workspace: wid ?? undefined, source: "memory", limit: 3 })
+        : [];
+      if (hits.length) {
+        const ids = hits.map((h) => h.memory_id);
+        const byId = new Map(this.all(
+          `SELECT * FROM memories WHERE id IN (${ids.map(() => "?").join(",")})`, ids).map((m) => [m.id, m]));
+        rows = ids.filter((i) => byId.has(i)).map((i) => byId.get(i)!);
+      }
+    }
+    this.annotate(rows);
+    const keep = ["id", "key", "value", "kind", "confidence", "source_run_id", "tool", "tool_version",
+      "fixes_span_id", "created_at", "stale", "stale_reason", "env_changes"];
+    const out: Row[] = rows.map((m) => ({ ...Object.fromEntries(keep.map((k) => [k, m[k] ?? null])), match }));
+    // stable sort: fresh fixes first, ranking otherwise preserved
+    return out.map((m, i) => [m, i] as const)
+      .sort((a, b) => Number(a[0].stale) - Number(b[0].stale) || a[1] - b[1]).map(([m]) => m);
   }
 
   // ---------------------------------------------------------------- raw SQL

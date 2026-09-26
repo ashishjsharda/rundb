@@ -10,15 +10,17 @@ import { connect, RunDBError } from "../dist/index.js";
 const here = dirname(fileURLToPath(import.meta.url));
 const tmp = () => join(mkdtempSync(join(tmpdir(), "rundb-")), "agent.db");
 
-test("creates file, migrates, schema copy matches canonical", () => {
+test("creates file, migrates, schema copies match canonical", () => {
   const p = join(mkdtempSync(join(tmpdir(), "rundb-")), "a", "b", "agent.db");
   const db = connect(p);
   assert.ok(existsSync(p));
-  assert.equal(db.schemaVersion, 1);
+  assert.equal(db.schemaVersion, 2);
   db.close();
-  assert.equal(connect(p).schemaVersion, 1);
-  const canonical = readFileSync(join(here, "..", "..", "schema", "001_init.sql"));
-  assert.deepEqual(readFileSync(join(here, "..", "migrations", "001_init.sql")), canonical);
+  assert.equal(connect(p).schemaVersion, 2);
+  for (const f of ["001_init.sql", "002_fixes_and_env.sql"]) {
+    const canonical = readFileSync(join(here, "..", "..", "schema", f));
+    assert.deepEqual(readFileSync(join(here, "..", "migrations", f)), canonical);
+  }
 });
 
 test("run lifecycle and validation", () => {

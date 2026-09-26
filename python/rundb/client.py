@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import mimetypes
 import os
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Any, Iterator, Sequence, Union
 
 from ._util import clip, fts_query, iso, new_id, now_iso, parse_since, terms, to_json, to_text
+from ._env import drift, fingerprint
 from .suggest import error_signature, suggest
 
 RUN_STATUSES = ("running", "succeeded", "failed", "aborted", "forked")
@@ -31,6 +33,11 @@ _STOPWORDS = {
     "the", "and", "for", "with", "error", "errors", "failed", "fail", "failure", "exception",
     "was", "not", "are", "this", "that", "from", "line", "file", "none", "null", "true", "false",
 }
+
+
+# SQL fragment: memory row `m` is the latest version of its key.
+_CURRENT_MEMORY = ("NOT EXISTS (SELECT 1 FROM memories n WHERE n.workspace_id = m.workspace_id "
+                   "AND n.key = m.key AND n.rowid > m.rowid)")
 
 
 class RunDBError(Exception):
@@ -89,16 +96,29 @@ def _statements(script: str) -> Iterator[str]:
         raise RunDBError(f"incomplete SQL statement in migration: {buf[:80]!r}")
 
 
-def connect(path: str | os.PathLike[str] | None = None) -> "RunDB":
+def connect(path: str | os.PathLike[str] | None = None, **kwargs: Any) -> "RunDB":
     """Open (and create/migrate if needed) a RunDB file. Default: $RUNDB_PATH or ./agent.db."""
-    return RunDB(path)
+    return RunDB(path, **kwargs)
 
 
 class RunDB:
     """One SQLite file holding runs, spans, artifacts, memories, chunks and events."""
 
-    def __init__(self, path: str | os.PathLike[str] | None = None, *, timeout: float = 10.0):
+    def __init__(
+        self,
+        path: str | os.PathLike[str] | None = None,
+        *,
+        timeout: float = 10.0,
+        fingerprint: bool | None = None,
+        cwd: str | os.PathLike[str] | None = None,
+    ):
+        """fingerprint: stamp memories with the git commit + lockfile hashes of `cwd` (default
+        on; set RUNDB_FINGERPRINT=0 to disable) so stale fixes can be flagged later."""
         path = path or os.environ.get("RUNDB_PATH") or DEFAULT_PATH
+        if fingerprint is None:
+            fingerprint = os.environ.get("RUNDB_FINGERPRINT", "1").lower() not in ("0", "false", "no", "off")
+        self.fingerprint = fingerprint
+        self.cwd = str(cwd) if cwd else None
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
@@ -361,8 +381,10 @@ class RunDB:
         started_at: str | None = None,
         ended_at: str | None = None,
         meta: Any = None,
+        version: str | None = None,
     ) -> str:
-        """Append a span. Non-string input/output/error are stored as JSON. Returns span id."""
+        """Append a span. Non-string input/output/error are stored as JSON. Returns span id.
+        version: the version of the tool called (e.g. "pytest 8.3"), filterable in search()."""
         if kind not in SPAN_KINDS:
             raise RunDBError(f"kind must be one of {SPAN_KINDS}, got {kind!r}")
         rid = _rid(run_id)
@@ -373,8 +395,8 @@ class RunDB:
             try:
                 self._insert("spans", {
                     "id": sid, "run_id": rid, "parent_span_id": parent_span_id, "kind": kind,
-                    "name": name, "input": to_text(input), "output": to_text(output), "error": err,
-                    "tokens_in": tokens_in, "tokens_out": tokens_out,
+                    "name": name, "version": version, "input": to_text(input),
+                    "output": to_text(output), "error": err, "tokens_in": tokens_in, "tokens_out": tokens_out,
                     "started_at": started_at or ts, "ended_at": ended_at or ts, "meta": to_json(meta),
                 })
             except sqlite3.IntegrityError as exc:
@@ -528,14 +550,39 @@ class RunDB:
         confidence: float | None = None,
         ttl: float | str | None = None,
         expires_at: str | None = None,
+        fixes: str | None = None,
+        tool: str | None = None,
+        tool_version: str | None = None,
+        error: str | None = None,
+        env: dict[str, Any] | bool | None = None,
     ) -> str:
         """Store a durable memory. Memories outlive failed runs. A newer value for the same key
-        supersedes the older one (history is kept)."""
+        supersedes the older one (history is kept).
+
+        To make a memory an exact, matchable fix, pass fixes=<failed span id> (tool, version,
+        error signature and source run are copied from that span) or tool=/error= directly.
+        The memory is stamped with the current git commit + lockfile hashes (env) unless
+        env=False or fingerprinting is off, so recall()/what_failed() can flag it when stale.
+        """
         if kind not in MEMORY_KINDS:
             raise RunDBError(f"kind must be one of {MEMORY_KINDS}, got {kind!r}")
         if ttl is not None and expires_at is None:
             seconds = float(ttl) if not isinstance(ttl, str) else _ttl_seconds(ttl)
             expires_at = iso(datetime.now(timezone.utc) + timedelta(seconds=seconds))
+        if fixes:
+            span = self._one("SELECT run_id, name, version, error FROM spans WHERE id = ?", (fixes,))
+            if not span:
+                raise RunDBError(f"span not found: {fixes}")
+            tool = tool or span["name"]
+            tool_version = tool_version or span["version"]
+            error = error or span["error"]
+            source_run_id = source_run_id or span["run_id"]
+        if env is None or env is True:
+            env_value = fingerprint(self.cwd) if (self.fingerprint or env is True) else None
+        elif env is False:
+            env_value = None
+        else:
+            env_value = env
         mid = new_id("mem")
         with self.batch():
             wid = self.workspace(workspace)
@@ -543,6 +590,9 @@ class RunDB:
                 "id": mid, "workspace_id": wid, "source_run_id": _rid(source_run_id), "kind": kind,
                 "key": key, "value": to_text(value), "confidence": confidence,
                 "expires_at": expires_at, "created_at": now_iso(),
+                "tool": tool, "tool_version": tool_version,
+                "error_signature": error_signature(error) if error else None,
+                "fixes_span_id": fixes, "env": to_json(env_value) if env_value else None,
             })
         return mid
 
@@ -552,10 +602,13 @@ class RunDB:
         key: str | None = None,
         *,
         kind: str | None = None,
+        tool: str | None = None,
         limit: int = 50,
         include_history: bool = False,
     ) -> list[dict[str, Any]]:
-        """Current (latest, unexpired) memories, optionally filtered by exact key or kind."""
+        """Current (latest, unexpired) memories, optionally filtered by exact key, kind or tool.
+        Each row gets `stale` / `stale_reason` / `env_changes` from comparing its saved
+        environment fingerprint with the current one."""
         wid = self.workspace(workspace, create=False)
         if not wid:
             return []
@@ -567,13 +620,27 @@ class RunDB:
         if kind:
             where.append("m.kind = ?")
             params.append(kind)
+        if tool:
+            where.append("m.tool = ?")
+            params.append(tool)
         if not include_history:
-            where.append("NOT EXISTS (SELECT 1 FROM memories n WHERE n.workspace_id = m.workspace_id "
-                         "AND n.key = m.key AND n.rowid > m.rowid)")
-        return self._all(
+            where.append(_CURRENT_MEMORY)
+        rows = self._all(
             f"SELECT m.* FROM memories m WHERE {' AND '.join(where)} ORDER BY m.rowid DESC LIMIT ?",
             (*params, limit),
         )
+        return self._annotate(rows)
+
+    def _annotate(self, memories: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Add stale / stale_reason / env_changes to memory rows."""
+        current = fingerprint(self.cwd) if (self.fingerprint and memories) else None
+        for m in memories:
+            saved = json.loads(m["env"]) if m.get("env") else None
+            d = drift(saved, current)
+            m["stale"] = d["stale"]
+            m["stale_reason"] = d["reason"]
+            m["env_changes"] = d["changes"]
+        return memories
 
     def forget(self, workspace: str, key: str) -> int:
         """Delete every version of a memory key. Returns rows deleted."""
@@ -598,13 +665,16 @@ class RunDB:
         kind: str | None = None,
         source: str | None = None,
         since: Any = None,
+        tool: str | None = None,
+        version: str | None = None,
         limit: int = 20,
         raw: bool = False,
     ) -> list[dict[str, Any]]:
         """Ranked full-text search over spans, memories and chunks.
 
         Filters: workspace (name or id), run_id, kind (span or memory kind), source
-        ('span'|'memory'|'chunk'), since (ISO time or '2h'/'7d'). All terms must match;
+        ('span'|'memory'|'chunk'), since (ISO time or '2h'/'7d'), tool (span name / memory
+        tool) and version (span version / memory tool_version). All terms must match;
         if nothing does, falls back to any-term matching. raw=True passes FTS5 syntax through.
         """
         filters, params = [], []
@@ -627,6 +697,22 @@ class RunDB:
         if cutoff:
             filters.append("search_index.ts >= ?")
             params.append(cutoff)
+        if tool or version:
+            span_where, mem_where = [], []
+            span_params: list[Any] = []
+            mem_params: list[Any] = []
+            if tool:
+                span_where.append("name = ?"); span_params.append(tool)
+                mem_where.append("tool = ?"); mem_params.append(tool)
+            if version:
+                span_where.append("version = ?"); span_params.append(version)
+                mem_where.append("tool_version = ?"); mem_params.append(version)
+            filters.append(
+                f"((search_index.source = 'span' AND search_index.span_id IN "
+                f"(SELECT id FROM spans WHERE {' AND '.join(span_where)})) OR "
+                f"(search_index.source = 'memory' AND search_index.memory_id IN "
+                f"(SELECT id FROM memories WHERE {' AND '.join(mem_where)})))")
+            params.extend(span_params + mem_params)
 
         if raw:
             queries = [query]
@@ -665,9 +751,21 @@ class RunDB:
 
     # ------------------------------------------------------------------ diagnosis
 
-    def what_failed(self, target: RunLike | None = None, *, limit: int = 10) -> dict[str, Any]:
+    def what_failed(
+        self,
+        target: RunLike | None = None,
+        *,
+        tool: str | None = None,
+        version: str | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
         """Summarize recent failures for a run (and its ancestors) or a workspace, with a
-        deterministic suggested next step. target: run id, workspace name/id, or None (all)."""
+        deterministic suggested next step. target: run id, workspace name/id, or None (all).
+        tool / version narrow it to one tool (span name) and tool version.
+
+        Fix lookup: memories whose error_signature exactly matches a recent failure come
+        first (same tool preferred, but a fix saved under another tool still applies);
+        otherwise falls back to full-text search. Each fix is flagged if possibly stale."""
         tid = _rid(target)
         scope: dict[str, Any]
         run_ids: list[str] | None = None
@@ -693,21 +791,31 @@ class RunDB:
         else:
             run_filter, rparams = "1 = 1", []
 
+        span_filter, sparams = "", []
+        if tool:
+            span_filter += " AND s.name = ?"
+            sparams.append(tool)
+        if version:
+            span_filter += " AND s.version = ?"
+            sparams.append(version)
         errors = self._all(
-            f"""SELECT s.run_id, s.id AS span_id, s.kind, s.name, s.error, s.input, s.started_at AS at
+            f"""SELECT s.run_id, s.id AS span_id, s.kind, s.name, s.version, s.error, s.input,
+                       s.started_at AS at
                 FROM spans s JOIN runs r ON r.id = s.run_id
-                WHERE {run_filter} AND s.error IS NOT NULL
+                WHERE {run_filter} AND s.error IS NOT NULL{span_filter}
                 ORDER BY s.started_at DESC, s.rowid DESC LIMIT 200""",
-            rparams,
+            (*rparams, *sparams),
         )
         for e in errors:
+            e["signature"] = error_signature(e["error"])
             e["input"] = clip(e["input"], 300)
             e["error"] = clip(e["error"], 1000)
 
         groups: dict[tuple[str, str], dict[str, Any]] = {}
         for e in errors:
-            k = (e["name"], error_signature(e["error"]))
-            g = groups.setdefault(k, {"name": e["name"], "error": e["error"], "count": 0, "run_ids": []})
+            k = (e["name"], e["signature"])
+            g = groups.setdefault(k, {"name": e["name"], "error": e["error"], "signature": e["signature"],
+                                      "count": 0, "run_ids": []})
             g["count"] += 1
             if e["run_id"] not in g["run_ids"]:
                 g["run_ids"].append(e["run_id"])
@@ -738,18 +846,11 @@ class RunDB:
                 failed_ids,
             )
 
-        memories: list[dict[str, Any]] = []
-        if errors:
-            words = [t for t in terms(" ".join(filter(None, [errors[0]["name"], errors[0]["error"]])))
-                     if len(t) >= 3 and t.lower() not in _STOPWORDS and not t.isdigit()]
-            if words:
-                hits = self.search(" ".join(dict.fromkeys(words)), workspace=wid, source="memory", limit=3)
-                if hits:
-                    ids = [h["memory_id"] for h in hits]
-                    marks = ",".join("?" for _ in ids)
-                    by_id = {m["id"]: m for m in self._all(
-                        f"SELECT id, key, value, kind, confidence, source_run_id FROM memories WHERE id IN ({marks})", ids)}
-                    memories = [by_id[i] for i in ids if i in by_id]
+        memories = self._related_fixes(errors, repeated, wid) if errors else []
+        if tool:
+            scope["tool"] = tool
+        if version:
+            scope["version"] = version
 
         return {
             "scope": scope,
@@ -761,6 +862,42 @@ class RunDB:
             "running": running,
             "suggested_next_step": suggest(errors, repeated, memories, resolved_by, running),
         }
+
+    def _related_fixes(
+        self, errors: list[dict[str, Any]], repeated: list[dict[str, Any]], wid: str | None
+    ) -> list[dict[str, Any]]:
+        latest = errors[0]
+        sigs = list(dict.fromkeys(
+            [latest["signature"]] + [g["signature"] for g in repeated[:3]]))
+        where = [f"m.error_signature IN ({','.join('?' for _ in sigs)})",
+                 "(m.expires_at IS NULL OR m.expires_at > ?)", _CURRENT_MEMORY]
+        params: list[Any] = [*sigs, now_iso()]
+        if wid:
+            where.append("m.workspace_id = ?")
+            params.append(wid)
+        rows = self._all(
+            f"""SELECT m.* FROM memories m WHERE {' AND '.join(where)}
+                ORDER BY (m.error_signature = ?) DESC, (m.tool IS ?) DESC, m.rowid DESC LIMIT 3""",
+            (*params, latest["signature"], latest["name"]),
+        )
+        match = "exact"
+        if not rows:
+            match = "text"
+            words = [t for t in terms(" ".join(filter(None, [latest["name"], latest["error"]])))
+                     if len(t) >= 3 and t.lower() not in _STOPWORDS and not t.isdigit()]
+            hits = self.search(" ".join(dict.fromkeys(words)), workspace=wid, source="memory",
+                               limit=3) if words else []
+            if hits:
+                ids = [h["memory_id"] for h in hits]
+                by_id = {m["id"]: m for m in self._all(
+                    f"SELECT * FROM memories WHERE id IN ({','.join('?' for _ in ids)})", ids)}
+                rows = [by_id[i] for i in ids if i in by_id]
+        self._annotate(rows)
+        keep = ("id", "key", "value", "kind", "confidence", "source_run_id", "tool", "tool_version",
+                "fixes_span_id", "created_at", "stale", "stale_reason", "env_changes")
+        out = [{**{k: m.get(k) for k in keep}, "match": match} for m in rows]
+        out.sort(key=lambda m: m["stale"])  # stable: fresh fixes first, ranking kept otherwise
+        return out
 
     # ------------------------------------------------------------------ raw SQL
 

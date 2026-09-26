@@ -42,10 +42,10 @@ class FakeRepo:
         return None, f"unknown command: {cmd}"
 
 
-def run_tool(db, run, repo: FakeRepo, cmd: str) -> bool:
+def run_tool(db, run, repo: FakeRepo, cmd: str) -> tuple[bool, str]:
     output, error = repo.run(cmd)
-    db.log_span(run, "tool", cmd.split()[0], input=cmd, output=output, error=error)
-    return error is None
+    span_id = db.log_span(run, "tool", cmd.split()[0], input=cmd, output=output, error=error)
+    return error is None, span_id
 
 
 def first_agent(db) -> int:
@@ -54,9 +54,11 @@ def first_agent(db) -> int:
     db.log_span(run, "thought", "plan", output="run pytest, fix whatever breaks")
 
     attempts = 0
+    failed_span = None
     for _ in range(5):  # a naive agent retrying the same thing
         attempts += 1
-        if run_tool(db, run, repo, "pytest -q"):
+        ok, failed_span = run_tool(db, run, repo, "pytest -q")
+        if ok:
             break
 
     report = db.what_failed(run)
@@ -68,7 +70,7 @@ def first_agent(db) -> int:
     attempts += 1
     run_tool(db, fix, repo, "pip install -r requirements.txt")
     attempts += 1
-    ok = run_tool(db, fix, repo, "pytest -q")
+    ok, _ = run_tool(db, fix, repo, "pytest -q")
     db.remember(
         WORKSPACE,
         key="tests.setup",
@@ -76,6 +78,7 @@ def first_agent(db) -> int:
         kind="constraint",
         source_run_id=fix,
         confidence=0.95,
+        fixes=failed_span,  # links the fix to the exact failure, so it matches across tools
     )
     db.end_run(fix, "succeeded" if ok else "failed", summary="installed deps; 12 passed")
     return attempts
@@ -93,7 +96,7 @@ def second_agent(db) -> int:
         attempts += 1
         run_tool(db, run, repo, "pip install -r requirements.txt")
     attempts += 1
-    ok = run_tool(db, run, repo, "pytest -q")
+    ok, _ = run_tool(db, run, repo, "pytest -q")
     db.end_run(run, "succeeded" if ok else "failed")
     return attempts
 

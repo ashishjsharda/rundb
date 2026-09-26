@@ -35,14 +35,14 @@ from rundb import connect
 db = connect("agent.db")                    # created + migrated on first open
 run = db.start_run("my-repo", goal="make tests pass", model="claude-sonnet-5")
 
-db.log_span(run, "tool", "pytest", input="pytest -q",
-            error="ModuleNotFoundError: No module named 'requests'")
+bad = db.log_span(run, "tool", "pytest", input="pytest -q",
+                  error="ModuleNotFoundError: No module named 'requests'")
 print(db.what_failed(run)["suggested_next_step"])
 
 retry = db.fork_run(run, goal="install deps first")   # new branch; old trace kept
 db.log_span(retry, "tool", "pip", input="pip install -r requirements.txt", output="ok")
 db.remember("my-repo", "tests.setup", "pip install -r requirements.txt before pytest",
-            kind="constraint", source_run_id=retry)   # outlives every run
+            kind="constraint", fixes=bad)             # outlives every run; matched exactly
 db.end_run(retry, "succeeded")
 
 for hit in db.search("ModuleNotFoundError"):
@@ -53,15 +53,25 @@ for hit in db.search("ModuleNotFoundError"):
 |---|---|
 | `connect(path="agent.db")` | Open the file. It is created and migrated if needed. `$RUNDB_PATH` overrides the default path. |
 | `start_run(workspace, goal, model=None, parent_run_id=None)` | Start a run and return a `Run` (`str(run)` is its id). |
-| `log_span(run_id, kind, name, input=None, output=None, error=None, **kw)` | Append a step. `kind` is one of `thought`, `tool`, `retrieve`, `write`, `eval` or `human`. Values that aren't strings are stored as JSON. |
+| `log_span(run_id, kind, name, input=None, output=None, error=None, **kw)` | Append a step. `kind` is one of `thought`, `tool`, `retrieve`, `write`, `eval` or `human`. Values that aren't strings are stored as JSON. Pass `version="8.3"` to record the tool version. |
 | `end_run(run_id, status, summary=None)` | Finish a run with `succeeded`, `failed`, `aborted` or `forked`. |
 | `fork_run(run_id, goal=None)` | Start a new run linked by `parent_run_id`. Spans are not copied. A parent that is still running is closed as `forked`. |
-| `remember(workspace, key, value, kind="fact", source_run_id=None)` | Save a durable memory (`fact`, `preference`, `decision` or `constraint`). A newer value for the same key replaces the old one, and the old one stays in history. Also accepts `ttl="7d"` and `confidence`. |
-| `search(query, workspace=, run_id=, kind=, source=, since="2h", limit=)` | Ranked full-text search across spans, memories and artifact text. Every hit carries `run_id` and `span_id`. |
-| `what_failed(run_id or workspace)` | Returns recent errors, repeated failures, related memories and forks that succeeded, plus a **suggested next step**. |
+| `remember(workspace, key, value, kind="fact", fixes=None, ...)` | Save a durable memory (`fact`, `preference`, `decision` or `constraint`). Pass `fixes=<failed span id>` to link it to the exact failure it solves. A newer value for the same key replaces the old one, and the old one stays in history. Also accepts `tool`, `ttl="7d"` and `confidence`. |
+| `search(query, workspace=, run_id=, kind=, source=, since="2h", tool=, version=, limit=)` | Ranked full-text search across spans, memories and artifact text. Every hit carries `run_id` and `span_id`. |
+| `what_failed(run_id or workspace, tool=None, version=None)` | Returns recent errors, repeated failures, known fixes (flagged if possibly stale) and forks that succeeded, plus a **suggested next step**. |
 | `sql(query, params)` | Plain SQL, for power users. |
 
 Also available: `recall`, `forget`, `add_artifact`, `add_chunk` (with an optional embedding), `similar`, `lineage`, `spans`, `events`, `abort_run`, `abort_stale`, `list_runs`, `batch()`.
+
+## How `what_failed()` works
+
+It's deterministic: plain rules, no LLM call.
+
+1. **Collect** the latest errors for the run and its ancestor runs (or for a whole workspace), optionally narrowed with `tool=` and `version=`.
+2. **Group repeats** by tool name plus a normalized error signature. The error is lowercased, UUIDs become `<uuid>`, runs of 8+ hex characters (commit SHAs, temp names) become `<hex>`, digits become `#`, and whitespace is collapsed. So `timeout after 30s` and `timeout after 31s` count as the same failure, and so do two errors that differ only by a SHA.
+3. **Find known fixes.** Memories saved with `fixes=<span>` store that signature. A fix whose signature matches exactly comes first (same tool preferred, but a fix saved under `pytest` still applies when `tox` fails the same way). If nothing matches exactly, it falls back to full-text search over memories.
+4. **Check staleness.** Each memory is stamped with the git commit and dependency lockfile hashes when it's saved. If a lockfile has changed since then, the fix is flagged `stale` and the suggestion says to verify it first. A new commit alone is reported but doesn't make a fix stale, since code always moves. Saving the fix again re-stamps it. Set `RUNDB_FINGERPRINT=0` to turn this off.
+5. **Suggest a next step**, in order: reuse a fork that already succeeded, apply a known fix, stop retrying something that has failed 3+ times unchanged, or a hint based on the error type (auth, timeout, missing config, missing file, and so on).
 
 ## Use it from your coding agent (MCP)
 
@@ -117,14 +127,15 @@ A Python agent and a TypeScript agent can share the same `agent.db`, and CI test
 
 ## Data model
 
-Seven tables, defined in [`schema/001_init.sql`](schema/001_init.sql):
+Seven tables, defined in [`schema/`](schema/) (migrations are applied automatically on open):
 
 ```
 workspaces(id, name, created_at, meta)
 runs(id, workspace_id, parent_run_id, branch_name, status, goal, model, started_at, ended_at, meta)
-spans(id, run_id, parent_span_id, kind, name, input, output, error, tokens_in, tokens_out, started_at, ended_at, meta)
+spans(id, run_id, parent_span_id, kind, name, version, input, output, error, tokens_in, tokens_out, started_at, ended_at, meta)
 artifacts(id, run_id, span_id, type, path_or_uri, mime, sha256, text_preview, meta)
-memories(id, workspace_id, source_run_id, kind, key, value, confidence, expires_at, created_at)
+memories(id, workspace_id, source_run_id, kind, key, value, confidence, expires_at, created_at,
+         tool, tool_version, error_signature, fixes_span_id, env)
 chunks(id, workspace_id, run_id, memory_id, artifact_id, text, embedding)
 events(id, run_id, ts, level, message, payload)
 ```
@@ -189,12 +200,12 @@ Ideas and issues are welcome.
 ## Development
 
 ```bash
-pip install -e "python[dev]" && pytest python/tests      # Python: 30 tests
-cd ts && npm install && npm test                          # TypeScript: 9 tests, incl. Python interop
+pip install -e "python[dev]" && pytest python/tests      # Python: 46 tests
+cd ts && npm install && npm test                          # TypeScript: 17 tests, incl. Python interop
 python bench/bench.py
 ```
 
-`schema/001_init.sql` is the canonical schema. Its copies in `python/rundb/migrations/` and `ts/migrations/` must stay byte-identical, and tests enforce that. See [CONTRIBUTING.md](CONTRIBUTING.md).
+The files in `schema/` are the canonical migrations. Their copies in `python/rundb/migrations/` and `ts/migrations/` must stay byte-identical, and tests enforce that. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

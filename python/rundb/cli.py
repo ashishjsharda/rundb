@@ -58,6 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--kind")
     c.add_argument("--source", choices=["span", "memory", "chunk"])
     c.add_argument("--since", help="ISO time or relative age like 30m, 2h, 7d")
+    c.add_argument("--tool", help="only this tool (span name / memory tool)")
+    c.add_argument("--tool-version", help="only this tool version")
     c.add_argument("--limit", "-n", type=int, default=20)
 
     c = cmd("sql", "run SQL (read-only unless --write)")
@@ -66,6 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     c = cmd("failed", "recent errors and a suggested next step")
     c.add_argument("target", nargs="?", help="run id or workspace (default: everything)")
+    c.add_argument("--tool", help="only failures of this tool")
+    c.add_argument("--tool-version", help="only failures of this tool version")
 
     c = cmd("abort", "abort a run, or every stale running run")
     c.add_argument("run_id", nargs="?")
@@ -85,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--input")
     c.add_argument("--output")
     c.add_argument("--error")
+    c.add_argument("--tool-version", help="version of the tool called")
 
     c = cmd("end", "finish a run")
     c.add_argument("run_id")
@@ -101,11 +106,14 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--workspace", "-w", default="default")
     c.add_argument("--kind", default="fact", choices=MEMORY_KINDS)
     c.add_argument("--run", help="source run id")
+    c.add_argument("--fixes", metavar="SPAN_ID", help="failed span this fixes (enables exact matching)")
+    c.add_argument("--tool", help="tool this applies to")
 
-    c = cmd("recall", "list current memories")
+    c = cmd("recall", "list current memories (STALE = dependencies changed since saved)")
     c.add_argument("key", nargs="?")
     c.add_argument("--workspace", "-w", default="default")
     c.add_argument("--kind", choices=MEMORY_KINDS)
+    c.add_argument("--tool")
 
     cmd("mcp", "run the MCP server on stdio")
     return p
@@ -209,7 +217,8 @@ def _dispatch(db: RunDB, args: argparse.Namespace) -> int | None:
 
     elif c == "search":
         hits = db.search(args.query, workspace=args.workspace, run_id=args.run, kind=args.kind,
-                         source=args.source, since=args.since, limit=args.limit)
+                         source=args.source, since=args.since, tool=args.tool,
+                         version=args.tool_version, limit=args.limit)
         _out(args, hits, _table(hits, ["source", "run_id", "span_id", "title", "snippet"],
                                 {"snippet": 70, "title": 24}))
 
@@ -219,7 +228,7 @@ def _dispatch(db: RunDB, args: argparse.Namespace) -> int | None:
         _out(args, rows, _table(rows, cols) if rows else "(no rows)")
 
     elif c == "failed":
-        report = db.what_failed(args.target)
+        report = db.what_failed(args.target, tool=args.tool, version=args.tool_version)
         human = (
             _table(report["errors"], ["run_id", "span_id", "name", "error"], {"error": 70})
             + (("\n\nrepeated:\n" + _table(report["repeated"], ["count", "name", "error"], {"error": 70}))
@@ -245,7 +254,7 @@ def _dispatch(db: RunDB, args: argparse.Namespace) -> int | None:
 
     elif c == "span":
         sid = db.log_span(args.run_id, args.kind, args.name, input=args.input, output=args.output,
-                          error=args.error)
+                          error=args.error, version=args.tool_version)
         _out(args, {"span_id": sid}, sid)
 
     elif c == "end":
@@ -257,12 +266,15 @@ def _dispatch(db: RunDB, args: argparse.Namespace) -> int | None:
         _out(args, run, run.id)
 
     elif c == "remember":
-        mid = db.remember(args.workspace, args.key, args.value, kind=args.kind, source_run_id=args.run)
+        mid = db.remember(args.workspace, args.key, args.value, kind=args.kind, source_run_id=args.run,
+                          fixes=args.fixes, tool=args.tool)
         _out(args, {"memory_id": mid}, mid)
 
     elif c == "recall":
-        rows = db.recall(args.workspace, args.key, kind=args.kind)
-        _out(args, rows, _table(rows, ["key", "kind", "value", "created_at"], {"value": 70}))
+        rows = db.recall(args.workspace, args.key, kind=args.kind, tool=args.tool)
+        for r in rows:
+            r["state"] = "STALE" if r["stale"] else ""
+        _out(args, rows, _table(rows, ["key", "kind", "tool", "value", "state"], {"value": 60}))
     return None
 
 

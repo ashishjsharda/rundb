@@ -27,14 +27,14 @@ def test_creates_file_and_migrates(tmp_path):
     assert not path.exists()
     d = connect(path)
     assert path.exists()
-    assert d.schema_version == 1
+    assert d.schema_version == 2
     tables = {r["name"] for r in d.sql("SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("workspaces", "runs", "spans", "artifacts", "memories", "chunks", "events", "search_index"):
         assert t in tables
     d.close()
     # re-open is a no-op migration
     d2 = connect(path)
-    assert d2.schema_version == 1
+    assert d2.schema_version == 2
     d2.close()
 
 
@@ -46,11 +46,13 @@ def test_default_path_env(tmp_path, monkeypatch):
 
 
 def test_schema_copies_identical():
-    canonical = (REPO / "schema" / "001_init.sql").read_bytes()
-    assert (REPO / "python" / "rundb" / "migrations" / "001_init.sql").read_bytes() == canonical
-    ts_copy = REPO / "ts" / "migrations" / "001_init.sql"
-    if ts_copy.exists():
-        assert ts_copy.read_bytes() == canonical
+    canonical = sorted((REPO / "schema").glob("*.sql"))
+    assert [p.name for p in canonical][:2] == ["001_init.sql", "002_fixes_and_env.sql"]
+    for src in canonical:
+        assert (REPO / "python" / "rundb" / "migrations" / src.name).read_bytes() == src.read_bytes()
+        ts_copy = REPO / "ts" / "migrations" / src.name
+        if ts_copy.parent.exists():
+            assert ts_copy.read_bytes() == src.read_bytes()
 
 
 # ---------------------------------------------------------------- runs & spans

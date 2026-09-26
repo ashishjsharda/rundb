@@ -29,13 +29,24 @@ ERROR_HINTS: list[tuple[str, str]] = [
 ]
 _COMPILED = [(re.compile(p, re.IGNORECASE), h) for p, h in ERROR_HINTS]
 
+# Order matters: UUIDs and hex runs must be folded before digits become '#',
+# otherwise a SHA like a3f9c21e turns into a#f#c#e first and never matches.
+_UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
+_HEX = re.compile(r"\b(?=[0-9a-f]*\d)[0-9a-f]{8,}\b")  # 8+ hex chars with at least one digit
 _NUM = re.compile(r"\d+")
 _WS = re.compile(r"\s+")
 
 
 def error_signature(error: str | None) -> str:
-    """Normalize an error so 'timeout after 31s' and 'timeout after 30s' group together."""
-    text = _NUM.sub("#", (error or "").lower())
+    """Normalize an error so variants of the same failure group together.
+
+    'timeout after 31s' == 'timeout after 30s'; commit SHAs, UUIDs and hex temp names fold to
+    <hex>/<uuid>. Identical in ts/src/suggest.ts.
+    """
+    text = (error or "").lower()
+    text = _UUID.sub("<uuid>", text)
+    text = _HEX.sub("<hex>", text)
+    text = _NUM.sub("#", text)
     return _WS.sub(" ", text).strip()[:200]
 
 
@@ -69,7 +80,11 @@ def suggest(
                      f"(search with run_id={r['id']}).")
     if memories:
         m = memories[0]
-        parts.append(f"Known fix in memory '{m['key']}': {m['value']}. Apply it before retrying.")
+        if m.get("stale"):
+            parts.append(f"Possible fix in memory '{m['key']}': {m['value']}. It may be stale "
+                         f"({m.get('stale_reason')}), so verify it before applying.")
+        else:
+            parts.append(f"Known fix in memory '{m['key']}': {m['value']}. Apply it before retrying.")
     if repeated and repeated[0]["count"] >= 3 and not parts:
         rep = repeated[0]
         parts.append(f"Stop retrying '{rep['name']}' unchanged: it failed {rep['count']}x with the "

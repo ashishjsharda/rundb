@@ -26,7 +26,11 @@ RunDB gives agents a memory they can query:
 - 🔎 **Full-text search** over every step, error and memory. Hits come back
   with `run_id` and `span_id`.
 - 🧠 **Memories that outlive failed runs**, so the fix is found next time.
-- 🩺 **`what_failed()`** returns recent errors plus a suggested next step.
+- 🩺 **`what_failed()`** returns recent errors, known fixes and a suggested next step.
+- 🎯 **Exact fix matching.** Save a fix with `fixes=<failed span>` and it's found the
+  next time the same error appears, even from a different tool.
+- ⏳ **Stale-fix detection.** Fixes are stamped with your git commit and lockfile hashes,
+  and flagged when your dependencies change.
 - 🔌 **MCP server built in**, so Claude Code, Cursor and other agents can use
   it with no glue code.
 - 📦 **Zero dependencies.** Pure Python standard library.
@@ -48,14 +52,14 @@ from rundb import connect
 db = connect("agent.db")  # created on first use
 run = db.start_run("my-repo", goal="make tests pass")
 
-db.log_span(run, "tool", "pytest",
-            error="ModuleNotFoundError: No module named 'requests'")
+bad = db.log_span(run, "tool", "pytest",
+                  error="ModuleNotFoundError: No module named 'requests'")
 print(db.what_failed(run)["suggested_next_step"])
 
 retry = db.fork_run(run, goal="install deps first")
 db.remember("my-repo", "tests.setup",
             "pip install -r requirements.txt before pytest",
-            kind="constraint")
+            kind="constraint", fixes=bad)
 db.end_run(retry, "succeeded")
 
 for hit in db.search("ModuleNotFoundError"):
@@ -103,9 +107,9 @@ rundb sql "select * from runs limit 5"
 | `log_span(run, kind, name, ...)` | Record a step (`tool`, `thought`, ...) |
 | `end_run(run, status)` | Finish with `succeeded`, `failed`, ... |
 | `fork_run(run, goal)` | Retry on a linked branch |
-| `remember(workspace, key, value)` | Save a durable lesson |
+| `remember(workspace, key, value, fixes=span)` | Save a durable fix |
 | `search(query, **filters)` | Ranked full-text search |
-| `what_failed(run or workspace)` | Errors plus a next step |
+| `what_failed(run or workspace)` | Errors, known fixes, next step |
 | `sql(query, params)` | Plain SQL |
 
 ## Also available
