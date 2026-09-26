@@ -114,7 +114,7 @@ rundb sql "select * from runs limit 5"
 
 ## Also available
 
-- **TypeScript SDK:** `npm install rundb`. It uses the same file format, so
+- **TypeScript SDK:** `npm install rundb-ai`. It uses the same file format, so
   Python and Node agents can share one database.
 - **Full docs, benchmarks and design notes:**
   [github.com/ashishjsharda/rundb](https://github.com/ashishjsharda/rundb)

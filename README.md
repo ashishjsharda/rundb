@@ -111,8 +111,12 @@ Every command accepts `--db PATH` and `--json`.
 
 Same file format and same operations, in camelCase. It uses the built-in `node:sqlite`, so there's nothing native to compile. Requires Node 22.16+ or 24+ (older `node:sqlite` builds lack full-text search, and RunDB says so with a clear error).
 
+```bash
+npm install rundb-ai
+```
+
 ```ts
-import { connect } from "rundb";
+import { connect } from "rundb-ai";
 
 const db = connect("agent.db");
 const run = db.startRun("my-repo", "make tests pass");

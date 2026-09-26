@@ -1,5 +1,5 @@
 {
-  "name": "rundb",
+  "name": "rundb-ai",
   "version": "0.2.0",
   "description": "Local-first, single-file database for AI agents: runs, retries, traces, memory. Zero dependencies (node:sqlite).",
   "license": "Apache-2.0",
