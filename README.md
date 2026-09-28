@@ -4,6 +4,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/rundb-ai?color=blue&label=pypi)](https://pypi.org/project/rundb-ai/)
 [![Downloads](https://img.shields.io/pepy/dt/rundb-ai?label=downloads)](https://pepy.tech/project/rundb-ai)
+[![M8ven Score](https://m8ven.ai/badge/mcp/ashishjsharda/rundb)](https://m8ven.ai/mcp/ashishjsharda/rundb)
 [![Python](https://img.shields.io/pypi/pyversions/rundb-ai)](https://pypi.org/project/rundb-ai/)
 [![CI](https://github.com/ashishjsharda/rundb/actions/workflows/ci.yml/badge.svg)](https://github.com/ashishjsharda/rundb/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
